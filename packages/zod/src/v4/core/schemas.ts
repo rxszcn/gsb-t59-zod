@@ -2253,8 +2253,8 @@ export const $ZodObjectJIT: core.$constructor<$ZodObject> = /*@__PURE__*/ core.$
     const generateFastpass = (shape: any) => {
       const normalized = _normalized.value;
       const syms = normalized.symbolKeys;
-      // a symbol has no source literal, so it is read as `syms[i]` off the closed-over scope
-      const doc = new Doc(["payload", "ctx"], { shape, inst, memo, syms });
+      // a symbol has no source literal, so it is read as `syms[i]` off the closed-over scope; AsyncError guards a Promise child on this sync-only path
+      const doc = new Doc(["payload", "ctx"], { shape, inst, memo, syms, AsyncError: core.$ZodAsyncError });
 
       const parseStr = (k: string) => `shape[${k}]._zod.run({ value: input[${k}], issues: [] }, ctx)`;
 
@@ -2293,6 +2293,7 @@ export const $ZodObjectJIT: core.$constructor<$ZodObject> = /*@__PURE__*/ core.$
         const isOptionalOut = schema?._zod?.optout === "optional";
 
         doc.write(`const ${id} = ${parseStr(k)};`);
+        doc.write(`if (${id} instanceof Promise) throw new AsyncError();`);
 
         if (isOptionalIn && isOptionalOut) {
           // For optional-in/out schemas, ignore errors on absent keys — and, like the interpreted path, drop the value produced alongside them. The middle rung goes further: it permits absence without supplying anything in its place, so an absent key contributes nothing at all.

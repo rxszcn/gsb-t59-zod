@@ -379,3 +379,57 @@ test("ensure early async failure prevents follow-up refinement checks", async ()
   //   expect(count).toBe(2);
   // });
 });
+
+test("sync parse of object with async member throws $ZodAsyncError on the object JIT fast path", () => {
+  // the object fastpass read .issues on a Promise child and crashed with an internal TypeError
+  const asyncTransform = z.string().transform(async (s) => s.length);
+  const asyncPreprocess = z.preprocess(async (v) => v, z.string());
+  const promiseSchema = z.promise(z.string());
+  const asyncRefine = z.string().refine(async () => false);
+  const asyncCheck = z.string().check(z.custom(async () => false));
+
+  const objectCases = [
+    z.object({ a: asyncTransform }),
+    z.object({ a: asyncPreprocess }),
+    z.object({ a: promiseSchema }),
+    z.object({ a: asyncRefine }),
+    z.object({ a: asyncCheck }),
+    z.object({ a: asyncTransform }).strict(),
+    z.looseObject({ a: asyncTransform }),
+    z.object({ a: asyncTransform }).catchall(z.number()),
+    z.object({ b: z.string(), a: asyncTransform }),
+    z.object({ a: z.optional(asyncTransform) }),
+  ];
+
+  for (const schema of objectCases) {
+    expect(() => schema.safeParse({ a: "abc", b: "x" })).toThrow(z.core.$ZodAsyncError);
+    expect(() => schema.parse({ a: "abc", b: "x" })).toThrow(z.core.$ZodAsyncError);
+  }
+
+  const containerCases: [z.ZodTypeAny, unknown][] = [
+    [z.array(promiseSchema), [Promise.resolve("a")]],
+    [z.tuple([promiseSchema]), [Promise.resolve("a")]],
+    [z.record(z.string(), promiseSchema), { k: Promise.resolve("a") }],
+  ];
+  for (const [schema, input] of containerCases) {
+    expect(() => schema.safeParse(input)).toThrow(z.core.$ZodAsyncError);
+  }
+});
+
+test("sync parse with jitless throws the same $ZodAsyncError", () => {
+  const schema = z.object({ a: z.string().transform(async (s) => s.length) });
+  expect(() => schema.safeParse({ a: "abc" }, { jitless: true })).toThrow(z.core.$ZodAsyncError);
+});
+
+test("parseAsync still resolves for objects with async members on the JIT fast path", async () => {
+  const schema = z.object({ a: z.string().transform(async (s) => s.length) });
+  const r = await schema.safeParseAsync({ a: "abc" });
+  expect(r.success).toBe(true);
+  if (r.success) expect(r.data).toEqual({ a: 3 });
+  await expect(schema.parseAsync({ a: "abc" })).resolves.toEqual({ a: 3 });
+
+  const promiseSchema = z.object({ a: z.promise(z.string()) });
+  const r2 = await promiseSchema.safeParseAsync({ a: Promise.resolve("abc") });
+  expect(r2.success).toBe(true);
+  if (r2.success) expect(r2.data).toEqual({ a: "abc" });
+});
