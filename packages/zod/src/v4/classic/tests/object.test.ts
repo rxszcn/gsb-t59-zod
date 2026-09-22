@@ -1004,3 +1004,56 @@ describe("symbol keys in object shape", () => {
     expect(() => z.object({ [SYM]: 123 as any }).parse({})).toThrow(/Invalid element at key "Symbol\(sym\)"/);
   });
 });
+
+test("jit fastpass throws $ZodAsyncError for async members, matching jitless and other containers", () => {
+  const asyncTransform = z.string().transform(async (s) => s.length);
+  const asyncPreprocess = z.preprocess(async (v) => v, z.string());
+  const asyncRefine = z.string().refine(async () => false, { message: "nope" });
+  const asyncCheck = z.string().check(z.custom(async () => false, { message: "bad" }));
+  const promised = z.promise(z.string());
+
+  const cases: [string, z.ZodTypeAny, unknown][] = [
+    ["async transform", z.object({ a: asyncTransform }), { a: "abc" }],
+    ["async preprocess", z.object({ a: asyncPreprocess }), { a: "abc" }],
+    ["async refine", z.object({ a: asyncRefine }), { a: "abc" }],
+    ["async check", z.object({ a: asyncCheck }), { a: "abc" }],
+    ["z.promise()", z.object({ a: promised }), { a: Promise.resolve("abc") }],
+    ["strict object", z.object({ a: asyncTransform }).strict(), { a: "abc" }],
+    ["loose object", z.looseObject({ a: asyncTransform }), { a: "abc" }],
+    ["catchall object", z.object({ a: asyncTransform }).catchall(z.number()), { a: "abc" }],
+    ["async after a sync key", z.object({ b: z.string(), a: asyncTransform }), { b: "x", a: "abc" }],
+    ["nested async object", z.object({ o: z.object({ a: asyncTransform }) }), { o: { a: "abc" } }],
+    ["async in object array", z.array(z.object({ a: asyncTransform })), [{ a: "abc" }]],
+  ];
+
+  for (const [name, schema, input] of cases) {
+    for (const params of [undefined, { jitless: true } as any]) {
+      expect(() => schema.safeParse(input, params), `${name} safeParse`).toThrowError(z.core.$ZodAsyncError);
+      expect(() => schema.parse(input, params), `${name} parse`).toThrowError(z.core.$ZodAsyncError);
+    }
+  }
+
+  // sibling containers already threw $ZodAsyncError; assert the object fastpass stays in that club
+  expect(() => z.array(promised).parse([Promise.resolve("a")])).toThrowError(z.core.$ZodAsyncError);
+  expect(() => z.tuple([promised]).parse([Promise.resolve("a")])).toThrowError(z.core.$ZodAsyncError);
+  expect(() => z.record(z.string(), promised).parse({ k: Promise.resolve("a") })).toThrowError(z.core.$ZodAsyncError);
+});
+
+test("jit fastpass keeps the $ZodAsyncError message", () => {
+  const schema = z.object({ a: z.promise(z.string()) });
+  expect(() => schema.parse({ a: Promise.resolve("abc") })).toThrowError(
+    /Encountered Promise during synchronous parse\. Use \.parseAsync\(\) instead\./
+  );
+});
+
+test("async members still parse with parseAsync under the jit fastpass", async () => {
+  const asyncTransform = z.string().transform(async (s) => s.length);
+  await expect(z.object({ a: asyncTransform }).parseAsync({ a: "abc" })).resolves.toEqual({ a: 3 });
+  await expect(z.object({ a: z.promise(z.string()) }).parseAsync({ a: Promise.resolve("abc") })).resolves.toEqual({
+    a: "abc",
+  });
+  // an absent optional member never runs its async parse, so sync parse succeeds on both paths
+  const optionalSchema = z.object({ a: asyncTransform.optional() });
+  expect(optionalSchema.safeParse({}).success).toBe(true);
+  expect(optionalSchema.safeParse({}, { jitless: true } as any).success).toBe(true);
+});
